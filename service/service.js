@@ -32,7 +32,7 @@
   // url.parse : le seul analyseur d'URL du Node 4 de la TV (les Node récents l'annoncent obsolète).
   var urlLib = require('url');
 
-  var VERSION = '0.1.0';
+  var VERSION = '0.1.1';
 
   // Réglages de test uniquement : DIAG_CONFIG n'existe pas sur la TV.
   var cfg = (typeof DIAG_CONFIG !== 'undefined' && DIAG_CONFIG) || {};
@@ -40,7 +40,8 @@
   var LAN_PORT = cfg.lanPort || 8099;
   var LAN_HOST = cfg.lanHost || '0.0.0.0';
   var LAN_MINUTES = cfg.lanMinutes || 30;
-  var ORIGINS = ['http://127.0.0.1:8081', 'http://localhost:8081'].concat(cfg.extraOrigins || []);
+  // Pages locales de TizenBrew ; « null » et « file:// » couvrent une origine locale opaque.
+  var ORIGINS = ['http://127.0.0.1:8081', 'http://localhost:8081', 'null', 'file://'].concat(cfg.extraOrigins || []);
   var ICON_ROOTS = cfg.iconRoots || ['/opt/', '/usr/'];
   var ICON_TYPES = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp' };
   var APPS_MAX_AGE = 5 * 60 * 1000;
@@ -61,6 +62,8 @@
     model: capability('http://tizen.org/system/model_name'),
     node: process.version,
     page: null,
+    // Toutes les demandes de session reçues, même refusées : dit si la page joint le service.
+    requests: { session: 0, lastSessionAt: null, refused: [] },
     apps: { list: null, at: null, ms: null, error: null },
     launches: [],
     local: { port: LOCAL_PORT, listening: false, error: null },
@@ -239,7 +242,15 @@
     function plausible(value) { return isFinite(value) && value > 0 && Math.abs(now - value) < 86400000; }
     var nav = Number(query.nav);
     var ready = Number(query.ready);
-    var visit = { navigationStart: plausible(nav) ? nav : null, readyAt: plausible(ready) ? ready : now, seenAt: now };
+    var tries = Number(query.tries);
+    var waited = Number(query.waited);
+    var visit = {
+      navigationStart: plausible(nav) ? nav : null,
+      readyAt: plausible(ready) ? ready : now,
+      seenAt: now,
+      tries: isFinite(tries) && tries > 0 ? tries : null,
+      waitedMs: isFinite(waited) && waited >= 0 && waited < 86400000 ? waited : null
+    };
     if (!state.page) {
       state.page = { first: visit, last: visit, visits: 1 };
     } else {
@@ -256,11 +267,15 @@
       appsListMs: state.apps.ms,
       tizenbrewToModuleMs: null,
       pageLoadMs: null,
-      pageVisits: 0
+      pageVisits: 0,
+      pageTries: null,
+      pageWaitedForServiceMs: null
     };
     var first = state.page && state.page.first;
     if (first) {
       t.pageVisits = state.page.visits;
+      t.pageTries = first.tries;
+      t.pageWaitedForServiceMs = first.waitedMs;
       if (first.navigationStart) {
         t.tizenbrewToModuleMs = first.navigationStart - state.tizenbrewStartedAt;
         t.pageLoadMs = first.readyAt - first.navigationStart;
@@ -301,6 +316,7 @@
       timings: timings(),
       apps: appsSummary(true),
       launches: state.launches,
+      requests: state.requests,
       local: state.local,
       lan: lanInfo()
     };
@@ -330,7 +346,9 @@
       '<p>Tizen ' + escapeHtml(r.platform) + ', ' + escapeHtml(r.model) + ', Node ' + escapeHtml(r.node) + '</p>' +
       '<p>Applis visibles : ' + r.apps.visible + ' sur ' + r.apps.count + ' entrées, liste lue en ' + seconds(r.apps.ms) +
       (r.apps.error ? ', erreur : ' + escapeHtml(r.apps.error) : '') + '</p>' +
-      '<p>TizenBrew jusqu\'au module : ' + seconds(r.timings.tizenbrewToModuleMs) + ' ; chargement de la page : ' + seconds(r.timings.pageLoadMs) + '</p>' +
+      '<p>TizenBrew jusqu\'au module : ' + seconds(r.timings.tizenbrewToModuleMs) + ' ; chargement de la page : ' + seconds(r.timings.pageLoadMs) +
+      ' ; attente du service par la page : ' + seconds(r.timings.pageWaitedForServiceMs) + '</p>' +
+      '<p>Demandes de la page reçues : ' + r.requests.session + ' ; refus : ' + r.requests.refused.length + '</p>' +
       '<p>Rapport complet : <a href="/rapport">/rapport</a> (JSON). Accès réseau fermé automatiquement à ' +
       escapeHtml(r.lan.until ? new Date(r.lan.until).toTimeString().slice(0, 5) : '?') + '.</p>' +
       '<form method="post" action="/fermer"><button type="submit">Fermer l\'accès réseau maintenant</button></form>' +
@@ -366,16 +384,32 @@
     });
   }
 
+  // Refus noté dans le rapport, et lisible par la page : sans en-tête CORS,
+  // le navigateur ne montrerait qu'une erreur réseau, comme un service arrêté.
+  function refuse(req, res, reason) {
+    var origin = req.headers.origin;
+    state.requests.refused.push({
+      at: Date.now(), reason: reason, origin: origin || null, remote: cleanAddress(req.socket.remoteAddress),
+      method: req.method, path: urlLib.parse(req.url).pathname
+    });
+    if (state.requests.refused.length > 20) { state.requests.refused.shift(); }
+    send(res, 403, { error: reason + (origin ? ' (' + origin + ').' : '.') }, origin ? { 'Access-Control-Allow-Origin': origin, 'Vary': 'Origin' } : {});
+  }
+
   function handleLocal(req, res) {
-    if (!isLoopback(req.socket.remoteAddress)) { return send(res, 403, { error: 'Réservé à la TV.' }); }
     var parsed = urlLib.parse(req.url, true);
     var path = parsed.pathname;
     var origin = req.headers.origin;
+    if (path === '/session') {
+      state.requests.session += 1;
+      state.requests.lastSessionAt = Date.now();
+    }
+    if (!isLoopback(req.socket.remoteAddress)) { return refuse(req, res, 'Réservé à la TV'); }
 
     // Les icônes sont chargées par des balises <img>, sans en-tête Origin.
     if (req.method === 'GET' && path === '/icone') { return serveIcon(parsed.query.id, res); }
 
-    if (ORIGINS.indexOf(origin) === -1) { return send(res, 403, { error: 'Origine refusée.' }); }
+    if (ORIGINS.indexOf(origin) === -1) { return refuse(req, res, 'Origine refusée'); }
     var cors = { 'Access-Control-Allow-Origin': origin, 'Vary': 'Origin' };
 
     if (req.method === 'OPTIONS') {

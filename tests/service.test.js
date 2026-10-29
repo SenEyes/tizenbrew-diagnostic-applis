@@ -64,25 +64,44 @@ describe('service du module', () => {
     assert.ok(Math.abs(lan.until - lan.openedAt - 30 * 60000) < 1000);
   });
 
-  it('refuse une origine absente ou étrangère', async () => {
-    assert.equal((await call(localPort, 'GET', '/session')).status, 403);
+  it('refuse une origine absente ou étrangère, de façon lisible et notée', async () => {
+    const absent = await call(localPort, 'GET', '/session');
+    assert.equal(absent.status, 403);
+    assert.equal(absent.headers['access-control-allow-origin'], undefined);
     const foreign = await call(localPort, 'GET', '/session', { headers: { Origin: 'http://exemple.invalid' } });
     assert.equal(foreign.status, 403);
-    assert.equal(foreign.headers['access-control-allow-origin'], undefined);
+    // L'en-tête CORS laisse la page lire la raison du refus ; aucun jeton dans la réponse.
+    assert.equal(foreign.headers['access-control-allow-origin'], 'http://exemple.invalid');
+    assert.equal(foreign.json.error, 'Origine refusée (http://exemple.invalid).');
+    assert.equal(foreign.json.token, undefined);
+    assert.equal(svc.state.requests.session, 2);
+    // Array.from : le tableau du service vient du contexte vm, on le recopie dans celui du test.
+    assert.deepEqual(Array.from(svc.state.requests.refused, (r) => r.origin), [null, 'http://exemple.invalid']);
+    assert.equal(svc.state.requests.refused[1].path, '/session');
+    assert.equal(svc.state.page, null);
   });
 
-  it('donne un jeton à la page et note ses horaires', async () => {
+  it('donne un jeton à la page et note ses horaires et ses essais', async () => {
     const nav = Date.now() - 1500;
     const ready = Date.now() - 200;
-    const res = await call(localPort, 'GET', `/session?nav=${nav}&ready=${ready}`, { headers: { Origin: ORIGIN } });
+    const res = await call(localPort, 'GET', `/session?nav=${nav}&ready=${ready}&tries=3&waited=2100`, { headers: { Origin: ORIGIN } });
     assert.equal(res.status, 200);
     assert.equal(res.headers['access-control-allow-origin'], ORIGIN);
     assert.match(res.json.token, /^[0-9a-f]{32}$/);
     assert.equal(res.json.platform, '5.5');
     assert.equal(svc.state.page.first.navigationStart, nav);
     assert.equal(svc.state.page.first.readyAt, ready);
+    assert.equal(res.json.timings.pageTries, 3);
+    assert.equal(res.json.timings.pageWaitedForServiceMs, 2100);
     assert.equal(typeof res.json.timings.tizenbrewToModuleMs, 'number');
     token = res.json.token;
+  });
+
+  it('accepte une origine locale opaque', async () => {
+    const res = await call(localPort, 'GET', '/session', { headers: { Origin: 'null' } });
+    assert.equal(res.status, 200);
+    assert.equal(res.headers['access-control-allow-origin'], 'null');
+    assert.equal(svc.state.page.visits, 2);
   });
 
   it('répond au contrôle CORS préalable de la page', async () => {
@@ -176,6 +195,8 @@ describe('service du module', () => {
     assert.equal(res.json.module, 'diagnostic-applis-tv');
     assert.equal(res.json.apps.list.length, 6);
     assert.ok(res.json.launches.length >= 3);
+    assert.equal(res.json.requests.session, 4);
+    assert.equal(res.json.requests.refused.length, 2);
     assert.ok(!res.text.includes(token));
     const page = await call(lanPort, 'GET', '/');
     assert.equal(page.status, 200);

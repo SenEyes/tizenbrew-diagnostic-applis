@@ -10,7 +10,7 @@ const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
 const { spawn, execFileSync } = require('node:child_process');
-const { ROOT, loadService, fakeTizen, freePort, waitFor } = require('./helpers/harness');
+const { ROOT, loadService, fakeTizen, freePort, waitFor, sleep } = require('./helpers/harness');
 
 const BROWSERS = [
   'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
@@ -112,6 +112,7 @@ describe('page du module, dans un vrai navigateur', { skip: browserPath ? false 
   let browser;
   let page;
   let staticServer;
+  let staticPort;
   let svc;
   let tz;
 
@@ -133,13 +134,8 @@ describe('page du module, dans un vrai navigateur', { skip: browserPath ? false 
   const stats = () => evaluate("document.getElementById('stats').textContent");
 
   before(async () => {
-    const staticPort = await freePort();
+    staticPort = await freePort();
     const localPort = await freePort();
-    tz = fakeTizen(APPS, { launchFails: ['CCCCCCCCCC.Panne'] });
-    svc = loadService({
-      tizen: tz,
-      config: { localPort, lanPort: await freePort(), lanHost: '127.0.0.1', extraOrigins: ['http://127.0.0.1:' + staticPort] }
-    });
     staticServer = await serveApp(staticPort);
     browser = await startBrowser();
     const targets = await (await fetch('http://127.0.0.1:' + browser.port + '/json/list')).json();
@@ -147,7 +143,14 @@ describe('page du module, dans un vrai navigateur', { skip: browserPath ? false 
     await page.send('Runtime.enable');
     await page.send('Page.enable');
     await page.send('Emulation.setDeviceMetricsOverride', { width: 1920, height: 1080, deviceScaleFactor: 1, mobile: false });
+    // Comme sur la TV : la page s'ouvre avant que TizenBrew ait fini de lancer le service.
     await page.send('Page.navigate', { url: 'http://127.0.0.1:' + staticPort + '/app/index.html?service=http://127.0.0.1:' + localPort });
+    await sleep(2500);
+    tz = fakeTizen(APPS, { launchFails: ['CCCCCCCCCC.Panne'] });
+    svc = loadService({
+      tizen: tz,
+      config: { localPort, lanPort: await freePort(), lanHost: '127.0.0.1', extraOrigins: ['http://127.0.0.1:' + staticPort] }
+    });
     await waitFor(async () => (await rowNames() || []).length > 0, { timeout: 15000 });
   });
 
@@ -156,6 +159,15 @@ describe('page du module, dans un vrai navigateur', { skip: browserPath ? false 
     stopBrowser(browser);
     if (staticServer) staticServer.close();
     if (svc) svc.stop();
+  });
+
+  it("attend le service quand il démarre après la page", async () => {
+    const first = svc.state.page.first;
+    assert.ok(first.tries >= 2, 'essais : ' + first.tries);
+    assert.ok(first.waitedMs >= 1500, 'attente : ' + first.waitedMs);
+    assert.equal(svc.state.page.visits, 1);
+    assert.match(await stats(), /service joint après \d+,\d s \(\d+ essais\)/);
+    assert.equal(await evaluate("getComputedStyle(document.getElementById('message')).display"), 'none');
   });
 
   it('affiche les applis visibles, triées, avec les délais et le lien du PC', async () => {
@@ -203,6 +215,22 @@ describe('page du module, dans un vrai navigateur', { skip: browserPath ? false 
     assert.equal(svc.state.lan.closedBy, 'page');
     await waitFor(async () => /Accès depuis le PC : fermé/.test(await stats()));
     assert.equal(await focusedTool(), "Rouvrir l'accès PC (30 min)");
+  });
+
+  it('affiche la raison quand le service refuse la page, sans insister', async () => {
+    const otherPort = await freePort();
+    const other = loadService({ tizen: fakeTizen(APPS), config: { localPort: otherPort, lanPort: await freePort(), lanHost: '127.0.0.1' } });
+    try {
+      await waitFor(() => other.state.local.listening);
+      await page.send('Page.navigate', { url: 'http://127.0.0.1:' + staticPort + '/app/index.html?service=http://127.0.0.1:' + otherPort });
+      const message = "document.getElementById('message').textContent";
+      await waitFor(async () => /^Origine refusée \(http:\/\/127\.0\.0\.1:\d+\)\./.test(await evaluate(message)), { timeout: 10000 });
+      await sleep(2500);
+      assert.equal(other.state.requests.session, 1);
+      assert.equal(other.state.requests.refused[0].origin, 'http://127.0.0.1:' + staticPort);
+    } finally {
+      other.stop();
+    }
   });
 
   it('ne lève aucune erreur JavaScript', () => {

@@ -9,7 +9,8 @@ Module de test pour TV Samsung (Tizen) avec [TizenBrew](https://github.com/reisx
 
 ## Sécurité
 
-- Le service écoute sur **127.0.0.1:8097** (la TV elle-même) et ne répond qu'à la page de TizenBrew (origine `http://127.0.0.1:8081`). Lancer une appli exige un jeton tiré au hasard à chaque démarrage, et seulement une appli présente dans la liste de la TV.
+- Le service écoute sur **127.0.0.1:8097** (la TV elle-même) et ne répond qu'aux pages locales de TizenBrew (origine `http://127.0.0.1:8081`, `http://localhost:8081` ou locale opaque). Un refus est noté dans le rapport et sa raison s'affiche sur la page. Lancer une appli exige un jeton tiré au hasard à chaque démarrage, et seulement une appli présente dans la liste de la TV.
+- TizenBrew ouvre la page et télécharge le service en même temps : la page réessaie donc tant que le service ne répond pas, et affiche le temps d'attente.
 - Pour lire le rapport depuis un PC, un second port, **8099**, s'ouvre pour **30 minutes** au démarrage du service. Il est **en lecture seule** et n'accepte que des adresses du réseau local. Il se ferme :
   - tout seul au bout de 30 minutes ;
   - avec le bouton « Fermer l'accès PC » de la page ;

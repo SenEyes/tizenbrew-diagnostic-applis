@@ -44,7 +44,7 @@
 (function () {
   'use strict';
 
-  var VERSION = '0.1.0';
+  var VERSION = '0.1.1';
   var PAGE = 6;
   var KEY = { LEFT: 37, UP: 38, RIGHT: 39, DOWN: 40, ENTER: 13, BACK: 10009, ESCAPE: 27 };
   var SERVICE = serviceUrl();
@@ -62,7 +62,10 @@
     top: 0,
     tool: 0,
     results: {},
-    busy: false
+    busy: false,
+    tries: 0,
+    joinedAfterMs: null,
+    joinedTries: null
   };
 
   function $(id) { return document.getElementById(id); }
@@ -73,6 +76,7 @@
     return m ? m[1] : 'http://127.0.0.1:8097';
   }
 
+  // done(erreur, données, statut) ; statut 0 = rien reçu (service pas encore à l'écoute, ou réseau).
   function request(method, path, body, done) {
     var xhr = new XMLHttpRequest();
     xhr.open(method, SERVICE + path, true);
@@ -84,11 +88,11 @@
     xhr.onload = function () {
       var data = null;
       try { data = JSON.parse(xhr.responseText); } catch (e) { data = null; }
-      if (xhr.status >= 200 && xhr.status < 300) { return done(null, data); }
-      done((data && data.error) || ('Erreur HTTP ' + xhr.status + '.'), data);
+      if (xhr.status >= 200 && xhr.status < 300) { return done(null, data, xhr.status); }
+      done((data && data.error) || ('Erreur HTTP ' + xhr.status + '.'), data, xhr.status);
     };
-    xhr.onerror = function () { done('Service du module injoignable (' + SERVICE + ').', null); };
-    xhr.ontimeout = function () { done('Le service du module ne répond pas.', null); };
+    xhr.onerror = function () { done('Service du module injoignable (' + SERVICE + ').', null, 0); };
+    xhr.ontimeout = function () { done('Le service du module ne répond pas.', null, 0); };
     xhr.send(body ? JSON.stringify(body) : null);
   }
 
@@ -117,6 +121,10 @@
     box.style.display = 'block';
   }
 
+  function hideMessage() {
+    $('message').style.display = 'none';
+  }
+
   /* ---------- Affichage ---------- */
 
   function tools() {
@@ -131,6 +139,12 @@
   function renderStats() {
     var lines = [];
     var apps = st.apps;
+    if (!st.info) {
+      $('stats').textContent = st.tries > 1
+        ? 'Attente du service du module : ' + seconds(Date.now() - readyAt) + ', ' + st.tries + ' essais…'
+        : 'Connexion au service du module…';
+      return;
+    }
     if (!apps) {
       lines.push('Lecture de la liste des applis…');
     } else if (apps.error) {
@@ -140,12 +154,17 @@
         (st.info && st.info.platform ? ' · Tizen ' + escapeHtml(st.info.platform) : ''));
     }
     var t = st.info && st.info.timings;
+    var joined = st.joinedTries
+      ? ' · service joint après <b>' + seconds(st.joinedAfterMs) + '</b> (' + st.joinedTries + (st.joinedTries > 1 ? ' essais)' : ' essai)')
+      : '';
     if (t && t.tizenbrewToModuleMs !== null && t.tizenbrewToModuleMs !== undefined) {
       if (t.tizenbrewToModuleMs <= 120000) {
-        lines.push("Ouverture de TizenBrew jusqu'au module : <b>" + seconds(t.tizenbrewToModuleMs) + '</b> · chargement de la page : <b>' + seconds(t.pageLoadMs) + '</b>');
+        lines.push("Ouverture de TizenBrew jusqu'au module : <b>" + seconds(t.tizenbrewToModuleMs) + '</b> · chargement de la page : <b>' + seconds(t.pageLoadMs) + '</b>' + joined);
       } else {
-        lines.push("TizenBrew était déjà ouvert : délai d'ouverture non mesurable · chargement de la page : <b>" + seconds(t.pageLoadMs) + '</b>');
+        lines.push("TizenBrew était déjà ouvert : délai d'ouverture non mesurable · chargement de la page : <b>" + seconds(t.pageLoadMs) + '</b>' + joined);
       }
+    } else if (joined) {
+      lines.push(joined.slice(3));
     }
     var lan = st.info && st.info.lan;
     if (lan) {
@@ -302,13 +321,27 @@
     render();
   });
 
-  function start() {
-    $('version').textContent = 'v' + VERSION;
-    render();
-    request('GET', '/session?nav=' + navigationStart + '&ready=' + readyAt, null, function (err, data) {
-      if (err) {
-        return showMessage(err + " Relance le module depuis TizenBrew ; si ça continue, redémarre la TV.");
+  // TizenBrew ouvre la page et télécharge le service en même temps : la page peut
+  // arriver avant que le service écoute. On réessaie donc tant que rien ne répond.
+  function connect() {
+    st.tries += 1;
+    var query = '?nav=' + navigationStart + '&ready=' + readyAt + '&tries=' + st.tries + '&waited=' + (Date.now() - readyAt);
+    request('GET', '/session' + query, null, function (err, data, status) {
+      if (err && status) {
+        // Le service répond mais refuse la page : réessayer ne changerait rien.
+        render();
+        return showMessage(err + ' Relance le module depuis TizenBrew ; si ça continue, redémarre la TV.');
       }
+      if (err) {
+        if (Date.now() - readyAt > 30000) {
+          showMessage('Le service du module ne répond toujours pas (' + SERVICE + '). Vérifie la connexion Internet de la TV, puis relance le module : Retour, puis sa carte.');
+        }
+        renderStats();
+        return setTimeout(connect, st.tries < 10 ? 1000 : 2000);
+      }
+      hideMessage();
+      st.joinedAfterMs = Date.now() - readyAt;
+      st.joinedTries = st.tries;
       st.token = data.token;
       st.info = data;
       if (data.version !== VERSION) {
@@ -321,7 +354,9 @@
     });
   }
 
-  start();
+  $('version').textContent = 'v' + VERSION;
+  render();
+  connect();
 })();
 </script>
 </body>

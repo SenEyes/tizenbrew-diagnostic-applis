@@ -1,7 +1,7 @@
 {
   "name": "tizenbrew-diagnostic-applis",
   "appName": "Diagnostic applis TV",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Liste les applis installées sur la TV, les lance une par une et mesure les délais. Module de test, à supprimer après usage.",
   "packageType": "app",
   "appPath": "app/index.html",
